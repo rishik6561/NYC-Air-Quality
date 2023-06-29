@@ -1,0 +1,423 @@
+---
+title: "Statistical Computing & Modeling"
+author: "Team - 06"
+date: "2023-04-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#importing the necessary libraries
+```{r}
+library(missForest)
+library(Hmisc)
+library(mice)
+library(VIM)
+library(rms)
+library(naniar)
+library(pool)
+library(boot)
+library(GGally)
+library(glmnet)
+library(caret)
+library(dplyr)
+```
+
+
+#Import Data
+```{r}
+data(airquality)
+head(airquality)
+```
+
+#Removing the Month and Day columns as they are not useful to our analysis
+```{r}
+airquality <- select(airquality, -Month, -Day)
+head(airquality)
+```
+
+# split the data into train and test
+```{r}
+set.seed(123)
+sample <- sample(nrow(airquality), nrow(airquality)*0.7)
+train <- airquality[sample,]
+test <- airquality[-sample,]
+```
+
+
+#Plotting a linear model to this dataset with Ozone as a response and all the other variables as predictors
+```{r}
+airq_NA <- lm(Ozone ~ Solar.R + Wind + Temp, data=train)
+summary(airq_NA)
+```
+```{r}
+residuals_NA <- as.data.frame(test$Ozone - predict(airq_NA,newdata = test))
+```
+
+```{r}
+Y_pred_NA <- predict(airq_NA,newdata = test)
+Y_pred_NA
+```
+
+
+```{r}
+MSE_NA <- mean(((Y_pred_NA - test$Ozone)^2),na.rm=TRUE)
+MSE_NA
+```
+
+
+```{r}
+plot(airq_NA)
+```
+
+
+#Checking the pattern of the missing values
+```{r}
+md.pattern(airquality)
+```
+#Counting the mssing values in each column
+```{r}
+sapply(airquality, function(x)sum(is.na(x)))
+```
+
+
+
+#Performing the MCAR test to determine whether the missing values are MCAR or not
+```{r}
+mcar_test(airquality)
+```
+#As the p-value is greater than 0.05, we can say that the missing values are MCAR(Missing completely at Random)
+
+
+#Imputing the missing values using MICE with m=5 and using PMM
+```{r}
+air_mice <- mice(airquality, m = 5, maxit = 50, meth = "pmm")
+```
+
+
+
+```{r}
+models <- with(air_mice, lm(Ozone ~ Solar.R + Wind + Temp))
+results <- pool(models)
+summary(results)
+```
+
+
+#Finding the estimates of all the 5 imputed models
+```{r}
+# Assuming that your response variable is named 'y' and your predictors are named 'x1', 'x2', etc.
+# Also assuming that the MICE object is named 'mice_imputed'
+models <- list() # Initialize an empty list to store the models
+
+# Iterate through each completed dataset and fit a linear model
+for(i in 1:5) {
+  completed_data <- complete(air_mice, action = i)
+  model <- lm(Ozone ~ Solar.R + Wind + Temp, data = completed_data)
+  models[[i]] <- model # Store the model in the list
+}
+
+# View the results
+#models
+```
+
+#Finding the adjusted R^2 for the 5 models
+```{r}
+# Initialize an empty vector to store the R-squared values
+rsq_values <- c()
+
+final_rsq <- 0
+#final_model
+# Iterate through each model and extract the R-squared value
+for(i in 1:5) {
+  summary_model <- summary(models[[i]])
+  rsq_values[i] <- summary_model$adj.r.squared
+  if(rsq_values[i]>final_rsq){
+    final_rsq<-rsq_values[i]
+    final_model <- i
+  }
+}
+
+# View the R-squared values
+rsq_values
+final_rsq
+```
+
+#The model with highest Adjusted R square was picked was further analysis.
+
+
+```{r}
+airq_mice <- complete(air_mice, action = final_model)
+airq_mice <- as.data.frame(airq_mice)
+airq_mice
+```
+
+```{r}
+#train test split of mice data
+train_mice <- airq_mice[sample,]
+test_mice <- airq_mice[-sample,]
+```
+
+
+#Plotting a linear model to this dataset with Ozone as a response and all the other variables as predictors
+```{r}
+airq_mice_lm <- lm(Ozone ~ Solar.R + Wind + Temp, data=train_mice)
+summary(airq_mice_lm)
+```
+```{r}
+residuals_mice <- as.data.frame(test_mice$Ozone - predict(airq_mice_lm,newdata = test_mice))
+```
+
+```{r}
+Y_pred_mice <- predict(airq_mice_lm,newdata = test_mice)
+Y_pred_mice
+```
+
+
+```{r}
+MSE_mice <- mean(((Y_pred_mice - test_mice$Ozone)^2),na.rm=TRUE)
+MSE_mice
+```
+```{r}
+plot(airq_mice_lm)
+```
+
+#Finding correlation
+```{r}
+ggpairs(airq_mice, columns = c("Ozone", "Solar.R", "Wind", "Temp"), 
+        title = "Scatterplot Matrix of Imputed Variables")
+```
+
+
+
+#Performing bootstrapping to estimsate bias and standard error
+```{r}
+coef_fun <- function(data, indices) {
+  fit <- lm(Ozone ~ Solar.R + Wind + Temp, data = data[indices,])
+  coef(fit)
+}
+```
+
+
+```{r}
+# Perform bootstrapping on the pooled results
+set.seed(123)
+boot_results <- boot(airq_mice, coef_fun, R = 1000)
+
+# View the bootstrap results
+boot_results
+```
+
+
+#Finding the estimates after bootstrapping
+```{r}
+boot_coefs <- boot_results$t
+boot.coef <- colMeans(boot_coefs)
+boot.coef
+```
+
+
+#Finding the confidence intervals for t1,t2,t3,t4
+```{r}
+set.seed(123)
+
+# Generate bootstrap estimates
+boot_coefs <- boot_results$t
+boot.coef <- colMeans(boot_coefs)
+
+# Calculate 95% confidence intervals
+boot.ci(boot_results, type = "bca", index = c(1,2,3,4))
+```
+#We only see the CI for t1 here because for t2,t3,t4 there is very less variability so bootstrapping couldn't provide meaningful confidence intervals.
+
+```{r}
+# Calculate the bias-corrected and accelerated (BCa) confidence intervals
+bc_ci <- boot::boot.ci(boot_results, type = "bca")
+
+# Plot the bootstrap distribution of the intercept
+plot(density(boot_coefs[,1]), main = "Bootstrap distribution of intercept")
+
+# Add vertical lines at the 2.5th and 97.5th percentiles of the distribution
+abline(v = quantile(boot_coefs[,1], c(0.025, 0.975)), col = "red")
+```
+
+```{r}
+# Calculate the bias-corrected and accelerated (BCa) confidence intervals
+bc_ci <- boot::boot.ci(boot_results, type = "bca")
+
+# Plot the bootstrap distribution of the intercept
+plot(density(boot_coefs[,2]), main = "Bootstrap distribution of Solar")
+
+# Add vertical lines at the 2.5th and 97.5th percentiles of the distribution
+abline(v = quantile(boot_coefs[,2], c(0.025, 0.975)), col = "red")
+```
+
+```{r}
+# Calculate the bias-corrected and accelerated (BCa) confidence intervals
+bc_ci <- boot::boot.ci(boot_results, type = "bca")
+
+# Plot the bootstrap distribution of the intercept
+plot(density(boot_coefs[,3]), main = "Bootstrap distribution of Wind")
+
+# Add vertical lines at the 2.5th and 97.5th percentiles of the distribution
+abline(v = quantile(boot_coefs[,3], c(0.025, 0.975)), col = "red")
+```
+
+```{r}
+# Calculate the bias-corrected and accelerated (BCa) confidence intervals
+bc_ci <- boot::boot.ci(boot_results, type = "bca")
+
+# Plot the bootstrap distribution of the intercept
+plot(density(boot_coefs[,4]), main = "Bootstrap distribution of Temperature")
+
+# Add vertical lines at the 2.5th and 97.5th percentiles of the distribution
+abline(v = quantile(boot_coefs[,4], c(0.025, 0.975)), col = "red")
+```
+
+
+#Again only intercept CI is given as others dont have much variability.
+```{r}
+
+# Generate predicted values for new data using bootstrap estimates
+boot_preds <- apply(boot.coefs, 1, function(x) x[1] + x[2]*airq_mice$Solar.R + x[3]*airq_mice$Wind + x[4]*airq_mice$Temp)
+#boot_preds
+
+# Calculate the 95% prediction interval
+boot_pi <-quantile(boot_preds, c(0.025, 0.975), na.rm = TRUE)
+
+# Print the prediction interval
+boot_pi
+
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+# Convert the boot_coefs matrix into a dataframe
+df_boot_coefs <- as.data.frame(boot_coefs)
+
+# Add a column for the row number (coefficient number)
+df_boot_coefs$row <- rownames(df_boot_coefs)
+
+# Convert the dataframe from wide to long format
+df_boot_coefs_long <- pivot_longer(df_boot_coefs, -row, names_to = "bootstrap", values_to = "value")
+
+# Plot the histogram with different colors for different coefficients
+ggplot(df_boot_coefs_long, aes(x = value, fill = bootstrap)) +
+  geom_histogram(bins = 20, color = "white", alpha = 0.7, position = "identity") +
+  scale_fill_discrete(labels = c("Intercept", "Solar.R", "Wind", "Temp"),name = "Coefficient") +
+  labs(x = "Bootstrap Coefficient Estimates", y = "Frequency",
+       title = "Histogram of Bootstrap Distribution of Coefficients")
+
+
+```
+#The resulting plot shows the distribution of the bootstrap coefficient estimates for "t1", which can provide information about the variability and uncertainty in the coefficient estimate.
+
+
+#Performing elastic net regression to reduce the multicollinearity between the predictors.
+
+```{r}
+X <- model.matrix(Ozone ~ ., data = airq_mice)[,-1]
+Y <- airq_mice$Ozone
+```
+
+
+```{r}
+X_train_elnet <- X[sample, ]
+Y_train_elnet <- Y[sample]
+X_test_elnet <- X[-sample, ]
+Y_test_elnet <- Y[-sample]
+```
+
+
+```{r}
+models <- list()
+for (i in 0:20) {
+  name <- paste0("alpha", i/20)
+  models[[name]] <- cv.glmnet(X_train_elnet, Y_train_elnet, type.measure="mse", alpha=i/20,family="gaussian")
+}
+```
+
+
+```{r}
+results <- data.frame()
+for (i in 0:20) {
+name <- paste0("alpha", i/20)
+## Use each model to predict 'y' given the Testing dataset
+Y_pred_CV <- predict(models[[name]],
+s=models[[name]]$lambda.min, newx=X_test_elnet)
+## Calculate the Mean Squared Error...
+mse <- mean((Y_pred_CV - Y_test_elnet)^2)
+## Store the results
+temp <- data.frame(alpha=i/20, mse=mse, name=name)
+results <- rbind(results, temp)
+}
+
+print(results)
+```
+```{r}
+ggplot(results, aes(x = alpha, y = mse)) +
+  geom_point() +
+  labs(x = "Alpha", y = "MSE", title = "Relationship between Alpha and MSE")
+
+```
+
+```{r}
+min_mse_alpha <- results$alpha[which.min(results$mse)]
+min_mse_alpha
+```
+
+
+#There is no difference in the MSE no matter the aplha value, hence we chose aplha=0.5 and performed elastic net regression on it.
+
+```{r}
+en_mod <- glmnet(x = X_train_elnet, y = Y_train_elnet, alpha = min_mse_alpha)
+```
+
+
+```{r}
+Y_pred_elnet <- predict(en_mod, newx = X_test_elnet)
+```
+
+
+```{r}
+mean((Y_pred_elnet - Y_test_elnet)^2)
+
+```
+
+```{r}
+elnet_coef <-coef(en_mod, s=models[[name]]$lambda.min)
+elnet_coef
+```
+
+#All the estimates
+
+```{r}
+lm_estimates <- coef(airq_NA)
+imp_estimates <- coef(airq_mice_lm)
+boot_estimates <- boot.coef
+elnet_coef_mat <- as.matrix(elnet_coef)
+enet_estimates <- elnet_coef_mat[, "s1"]
+
+lm_estimates
+imp_estimates
+boot_estimates
+enet_estimates
+```
+
+
+
+```{r}
+# Create a data frame with the MSE values
+df_mse <- data.frame(method = c("NA", "MICE"), mse = c(MSE_NA, MSE_mice))
+
+# Plot the MSE values as a line plot
+ggplot(df_mse, aes(x = reorder(method,-mse), y = mse, group = 1)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "", y = "MSE", title = "Comparison of MSEmice and MSE_NA") +
+  theme_bw()
+```
+
